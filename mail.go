@@ -273,6 +273,54 @@ func (ic *IMAPConn) Logout() error {
 	return nil
 }
 
+// ensureAuthenticated checks if the connection is still authenticated and reconnects if needed
+func (ic *IMAPConn) ensureAuthenticated(ctx context.Context) error {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
+
+	// Check if we have a valid connection by trying a simple operation
+	if ic.cl != nil && ic.authed {
+		// Try to get the server capability to test if connection is still valid
+		_, err := ic.cl.Capability()
+		if err == nil {
+			return nil // Connection is still good
+		}
+		log.Printf("IMAP connection lost, attempting to reconnect: %v", err)
+		// Connection is bad, clean up
+		ic.cl.Logout()
+		ic.cl = nil
+		ic.authed = false
+	}
+
+	// Reconnect
+	dialer := &net.Dialer{Timeout: ic.cfg.Timeout}
+	var c *client.Client
+	var err error
+	if ic.cfg.TLS {
+		tlsCfg := &tls.Config{
+			ServerName:         ic.cfg.Server,
+			InsecureSkipVerify: ic.cfg.SkipCert,
+		}
+		c, err = client.DialWithDialerTLS(dialer, fmt.Sprintf("%s:%d", ic.cfg.Server, ic.cfg.Port), tlsCfg)
+	} else {
+		c, err = client.DialWithDialer(dialer, fmt.Sprintf("%s:%d", ic.cfg.Server, ic.cfg.Port))
+	}
+	if err != nil {
+		return fmt.Errorf("failed to dial IMAP server: %w", err)
+	}
+
+	// Login
+	if err = c.Login(ic.cfg.Username, ic.cfg.Password); err != nil {
+		c.Logout()
+		return fmt.Errorf("failed to login to IMAP server: %w", err)
+	}
+
+	ic.cl = c
+	ic.authed = true
+	log.Printf("Successfully reconnected to IMAP server")
+	return nil
+}
+
 type MailboxInfo struct {
 	Name     string
 	Exists   uint32
@@ -746,6 +794,11 @@ func computeMailboxSizes(ctx context.Context, ic *IMAPConn, cache *Cache, boxes 
 }
 
 func mailboxApproxSize(ctx context.Context, ic *IMAPConn, cache *Cache, mailbox string) (uint64, error) {
+	// Ensure we have a valid authenticated connection before proceeding
+	if err := ic.ensureAuthenticated(ctx); err != nil {
+		return 0, fmt.Errorf("failed to ensure IMAP authentication: %w", err)
+	}
+
 	_, err := ic.cl.Select(mailbox, true)
 	if err != nil {
 		return 0, err
@@ -812,6 +865,11 @@ func mailboxApproxSize(ctx context.Context, ic *IMAPConn, cache *Cache, mailbox 
 }
 
 func fetchMessagesApprox(ctx context.Context, ic *IMAPConn, cache *Cache, mailbox string) ([]*MsgEntry, error) {
+	// Ensure we have a valid authenticated connection before proceeding
+	if err := ic.ensureAuthenticated(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure IMAP authentication: %w", err)
+	}
+
 	mbox, err := ic.cl.Select(mailbox, true)
 	if err != nil {
 		return nil, err
@@ -903,6 +961,12 @@ func deleteMessage(ctx context.Context, ic *IMAPConn, mailbox string, uid uint32
 	if dryRun {
 		return nil
 	}
+
+	// Ensure we have a valid authenticated connection before proceeding
+	if err := ic.ensureAuthenticated(ctx); err != nil {
+		return fmt.Errorf("failed to ensure IMAP authentication: %w", err)
+	}
+
 	_, err := ic.cl.Select(mailbox, false)
 	if err != nil {
 		return err
@@ -920,6 +984,11 @@ func deleteMessage(ctx context.Context, ic *IMAPConn, mailbox string, uid uint32
 // stripAttachments downloads the message, rebuilds it removing attachments (Content-Disposition: attachment),
 // keeps inline parts, re-uploads preserving flags/date, then deletes original.
 func stripAttachments(ctx context.Context, ic *IMAPConn, mailbox string, uid uint32, dryRun bool) error {
+	// Ensure we have a valid authenticated connection before proceeding
+	if err := ic.ensureAuthenticated(ctx); err != nil {
+		return fmt.Errorf("failed to ensure IMAP authentication: %w", err)
+	}
+
 	_, err := ic.cl.Select(mailbox, false)
 	if err != nil {
 		return err
