@@ -1,4 +1,4 @@
-module github.com/brainexe/maildu
+module maildu
 
 go 1.24
 

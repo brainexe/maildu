@@ -2,7 +2,7 @@
 
 # Variables
 BINARY_NAME=maildu
-MAIN_FILE=mail.go
+MAIN_DIR=cmd/imapdu
 
 # Default target
 .PHONY: all
@@ -11,12 +11,12 @@ all: build
 # Build the binary
 .PHONY: build
 build:
-	go build -o $(BINARY_NAME) $(MAIN_FILE)
+	go build -o $(BINARY_NAME) ./$(MAIN_DIR)
 
 # Run the application
 .PHONY: run
 run:
-	go run $(MAIN_FILE)
+	go run ./$(MAIN_DIR)
 
 # Clean build artifacts
 .PHONY: clean
