@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-message"
+	"github.com/joho/godotenv"
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -29,6 +31,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+func init() {
+	// Load .env file if it exists
+	if err := godotenv.Load(); err != nil {
+		// Don't fail if .env file doesn't exist, just continue
+		log.Printf("No .env file found or error loading it: %v", err)
+	}
+}
 
 // simpleLiteral implements imap.Literal interface
 type simpleLiteral struct {
@@ -42,7 +52,7 @@ func newLiteral(data []byte) imap.Literal {
 
 func (l *simpleLiteral) Read(p []byte) (int, error) {
 	if l.pos >= len(l.data) {
-		return 0, fmt.Errorf("EOF")
+		return 0, io.EOF
 	}
 	n := copy(p, l.data[l.pos:])
 	l.pos += n
@@ -76,6 +86,7 @@ type Config struct {
 	Cache    string
 	Timeout  time.Duration
 	SkipCert bool
+	DryRun   bool
 }
 
 func loadConfig() (Config, error) {
@@ -88,6 +99,7 @@ func loadConfig() (Config, error) {
 	flag.StringVar(&cfg.Password, "pass", os.Getenv("IMAP_PASS"), "IMAP password (env IMAP_PASS)")
 	flag.StringVar(&cfg.Cache, "cache", envStr("IMAPDU_CACHE", filepath.Join(defaultDataDir(), defaultCacheFile)), "Cache file path")
 	flag.DurationVar(&cfg.Timeout, "timeout", envDuration("IMAP_TIMEOUT", 30*time.Second), "Network timeout")
+	flag.BoolVar(&cfg.DryRun, "dry-run", envBool("IMAPDU_DRY_RUN", true), "Dry run mode - prevent actual deletion of mails/attachments (env IMAPDU_DRY_RUN)")
 	flag.Parse()
 
 	if cfg.Server == "" || cfg.Username == "" || cfg.Password == "" {
@@ -152,13 +164,20 @@ type MsgMeta struct {
 }
 
 func openCache(path string) (*Cache, error) {
+	log.Printf("Creating cache directory for path: %s", path)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("Failed to create cache directory: %v", err)
 		return nil, err
 	}
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 1 * time.Second})
+
+	log.Printf("Opening BoltDB at: %s", path)
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
+		log.Printf("Failed to open BoltDB: %v", err)
 		return nil, err
 	}
+
+	log.Printf("Initializing cache buckets...")
 	err = db.Update(func(tx *bolt.Tx) error {
 		if _, e := tx.CreateBucketIfNotExists([]byte(cacheBucketMsgs)); e != nil {
 			return e
@@ -175,9 +194,12 @@ func openCache(path string) (*Cache, error) {
 		return nil
 	})
 	if err != nil {
+		log.Printf("Failed to initialize cache buckets: %v", err)
 		_ = db.Close()
 		return nil, err
 	}
+
+	log.Printf("Cache opened successfully")
 	return &Cache{db: db}, nil
 }
 
@@ -375,16 +397,24 @@ func (m model) Init() tea.Cmd {
 
 func (m model) loadMailboxesCmd() tea.Cmd {
 	return func() tea.Msg {
+		log.Printf("Starting to load mailboxes...")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
+
+		log.Printf("Fetching mailboxes from IMAP server...")
 		boxes, err := fetchMailboxes(ctx, m.ic)
 		if err != nil {
+			log.Printf("Error fetching mailboxes: %v", err)
 			return errMsg{err}
 		}
+
 		// Compute sizes (approx via RFC822.SIZE aggregate)
+		log.Printf("Computing mailbox sizes...")
 		if err := computeMailboxSizes(ctx, m.ic, m.cache, boxes); err != nil {
+			log.Printf("Error computing mailbox sizes: %v", err)
 			return errMsg{err}
 		}
+
 		return boxesMsg{boxes}
 	}
 }
@@ -452,7 +482,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	header := fmt.Sprintf("Server: %s  Mailbox: %s  Sort: %s\n", m.cfg.Server, pathString(m.path), m.sortBy)
+	dryRunStatus := ""
+	if m.cfg.DryRun {
+		dryRunStatus = " [DRY RUN]"
+	}
+	header := fmt.Sprintf("Server: %s  Mailbox: %s  Sort: %s%s\n", m.cfg.Server, pathString(m.path), m.sortBy, dryRunStatus)
 	if m.err != nil {
 		header += lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Error: "+m.err.Error()) + "\n"
 	}
@@ -580,7 +614,7 @@ func (m model) handleDelete() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if err := deleteMessage(ctx, m.ic, mb, uid); err != nil {
+		if err := deleteMessage(ctx, m.ic, mb, uid, m.cfg.DryRun); err != nil {
 			return errMsg{err}
 		}
 		// refresh mailbox
@@ -602,7 +636,7 @@ func (m model) handleStrip() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		if err := stripAttachments(ctx, m.ic, mb, uid); err != nil {
+		if err := stripAttachments(ctx, m.ic, mb, uid, m.cfg.DryRun); err != nil {
 			return errMsg{err}
 		}
 		msgs, err := fetchMessagesApprox(ctx, m.ic, m.cache, mb)
@@ -623,27 +657,41 @@ func pathString(p []string) string {
 // IMAP helpers
 
 func fetchMailboxes(ctx context.Context, ic *IMAPConn) (map[string]*MailboxInfo, error) {
+	log.Printf("Starting fetchMailboxes...")
 	mboxes := map[string]*MailboxInfo{}
 	ch := make(chan *imap.MailboxInfo, 50)
 	done := make(chan error, 1)
 	go func() {
+		log.Printf("Calling IMAP List command...")
 		done <- ic.cl.List("", "*", ch)
 	}()
+
+	count := 0
 	for m := range ch {
 		mb := &MailboxInfo{Name: m.Name}
 		mboxes[m.Name] = mb
+		count++
+		count++
 	}
+
 	if err := <-done; err != nil {
+		log.Printf("List command failed: %v", err)
 		return nil, err
 	}
+
 	// Fetch exists counts quickly by STATUS
+	statusCount := 0
 	for name := range mboxes {
 		status, err := ic.cl.Status(name, []imap.StatusItem{imap.StatusMessages})
 		if err != nil {
+			log.Printf("Status failed for mailbox %s: %v", name, err)
 			continue
 		}
 		mboxes[name].Exists = status.Messages
+		statusCount++
+
 	}
+
 	// hierarchy
 	sep := detectHierarchySep(mboxes)
 	for name, mb := range mboxes {
@@ -683,13 +731,16 @@ func rootLevel(m map[string]*MailboxInfo) []*MailboxInfo {
 }
 
 func computeMailboxSizes(ctx context.Context, ic *IMAPConn, cache *Cache, boxes map[string]*MailboxInfo) error {
+	processed := 0
 	for name := range boxes {
 		size, err := mailboxApproxSize(ctx, ic, cache, name)
 		if err != nil {
+			log.Printf("Error computing size for mailbox %s: %v", name, err)
 			// best effort
 			continue
 		}
 		boxes[name].SizeSum = size
+		processed++
 	}
 	return nil
 }
@@ -848,7 +899,10 @@ func fetchMessagesApprox(ctx context.Context, ic *IMAPConn, cache *Cache, mailbo
 	return msgs, nil
 }
 
-func deleteMessage(ctx context.Context, ic *IMAPConn, mailbox string, uid uint32) error {
+func deleteMessage(ctx context.Context, ic *IMAPConn, mailbox string, uid uint32, dryRun bool) error {
+	if dryRun {
+		return nil
+	}
 	_, err := ic.cl.Select(mailbox, false)
 	if err != nil {
 		return err
@@ -865,7 +919,7 @@ func deleteMessage(ctx context.Context, ic *IMAPConn, mailbox string, uid uint32
 
 // stripAttachments downloads the message, rebuilds it removing attachments (Content-Disposition: attachment),
 // keeps inline parts, re-uploads preserving flags/date, then deletes original.
-func stripAttachments(ctx context.Context, ic *IMAPConn, mailbox string, uid uint32) error {
+func stripAttachments(ctx context.Context, ic *IMAPConn, mailbox string, uid uint32, dryRun bool) error {
 	_, err := ic.cl.Select(mailbox, false)
 	if err != nil {
 		return err
@@ -905,6 +959,9 @@ func stripAttachments(ctx context.Context, ic *IMAPConn, mailbox string, uid uin
 	if err := ic.cl.Append(mailbox, origFlags, msg.InternalDate, newMsg); err != nil {
 		return err
 	}
+	if dryRun {
+		return nil
+	}
 	// delete original
 	del := new(imap.SeqSet)
 	del.AddNum(uid)
@@ -921,7 +978,7 @@ func buildMessageWithoutAttachments(r imap.Literal) (imap.Literal, error) {
 		return nil, err
 	}
 	// If not multipart, return as is
-	mediaType, params, _ := mr.Header.ContentType()
+	mediaType, _, _ := mr.Header.ContentType()
 	if !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
 		// nothing to strip - just return original content as new literal
 		var b strings.Builder
@@ -999,25 +1056,35 @@ func humanBytes(b uint64) string {
 }
 
 func main() {
+	log.Printf("Starting imapdu application...")
+
+	log.Printf("Loading configuration...")
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Configuration loaded successfully. Server: %s, User: %s", cfg.Server, cfg.Username)
+
+	log.Printf("Opening cache at: %s", cfg.Cache)
 	cache, err := openCache(cfg.Cache)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer cache.Close()
+	log.Printf("Cache opened successfully")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	log.Printf("Connecting to IMAP server %s:%d...", cfg.Server, cfg.Port)
 	ic, err := dialIMAP(ctx, cfg)
 	if err != nil {
+		log.Printf("Failed to connect to IMAP server: %v", err)
 		log.Fatal(err)
 	}
 	defer ic.Logout()
 
+	log.Printf("Starting TUI...")
 	p := tea.NewProgram(initialModel(cfg, cache, ic), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		log.Fatal(err)
