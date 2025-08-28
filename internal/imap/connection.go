@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/emersion/go-imap/client"
 )
@@ -22,22 +24,35 @@ func Dial(ctx context.Context, cfg Config) (*Conn, error) {
 	dialer := &net.Dialer{Timeout: cfg.Timeout}
 	var c *client.Client
 	var err error
-	if cfg.TLS {
-		tlsCfg := &tls.Config{
-			ServerName:         cfg.Server,
-			InsecureSkipVerify: cfg.SkipCert, // if true, user accepts risk
+
+	// Try to connect with retries
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if cfg.TLS {
+			tlsCfg := &tls.Config{
+				ServerName:         cfg.Server,
+				InsecureSkipVerify: cfg.SkipCert, // if true, user accepts risk
+			}
+			c, err = client.DialWithDialerTLS(dialer, fmt.Sprintf("%s:%d", cfg.Server, cfg.Port), tlsCfg)
+		} else {
+			c, err = client.DialWithDialer(dialer, fmt.Sprintf("%s:%d", cfg.Server, cfg.Port))
 		}
-		c, err = client.DialWithDialerTLS(dialer, fmt.Sprintf("%s:%d", cfg.Server, cfg.Port), tlsCfg)
-	} else {
-		c, err = client.DialWithDialer(dialer, fmt.Sprintf("%s:%d", cfg.Server, cfg.Port))
+		if err == nil {
+			break
+		}
+		if attempt < maxRetries-1 {
+			log.Printf("Connection attempt %d failed: %v, retrying...", attempt+1, err)
+			time.Sleep(time.Duration(attempt+1) * time.Second)
+		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, err)
 	}
+
 	// Login
 	if err = c.Login(cfg.Username, cfg.Password); err != nil {
 		_ = c.Logout()
-		return nil, err
+		return nil, fmt.Errorf("failed to login: %w", err)
 	}
 	return &Conn{cl: c, cfg: cfg, authed: true}, nil
 }
@@ -63,40 +78,66 @@ func (ic *Conn) ensureAuthenticated(ctx context.Context) error {
 		if err == nil {
 			return nil // Connection is still good
 		}
-		log.Printf("IMAP connection lost, attempting to reconnect: %v", err)
+
+		// Check for specific error types
+		if strings.Contains(err.Error(), "short write") ||
+			strings.Contains(err.Error(), "connection reset") ||
+			strings.Contains(err.Error(), "broken pipe") {
+			log.Printf("IMAP connection lost due to network issue (%v), attempting to reconnect...", err)
+		} else {
+			log.Printf("IMAP connection lost, attempting to reconnect: %v", err)
+		}
+
 		// Connection is bad, clean up
 		ic.cl.Logout()
 		ic.cl = nil
 		ic.authed = false
 	}
 
-	// Reconnect
-	dialer := &net.Dialer{Timeout: ic.cfg.Timeout}
-	var c *client.Client
-	var err error
-	if ic.cfg.TLS {
-		tlsCfg := &tls.Config{
-			ServerName:         ic.cfg.Server,
-			InsecureSkipVerify: ic.cfg.SkipCert,
+	// Reconnect with retries
+	maxRetries := 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		dialer := &net.Dialer{Timeout: ic.cfg.Timeout}
+		var c *client.Client
+		var err error
+
+		if ic.cfg.TLS {
+			tlsCfg := &tls.Config{
+				ServerName:         ic.cfg.Server,
+				InsecureSkipVerify: ic.cfg.SkipCert,
+			}
+			c, err = client.DialWithDialerTLS(dialer, fmt.Sprintf("%s:%d", ic.cfg.Server, ic.cfg.Port), tlsCfg)
+		} else {
+			c, err = client.DialWithDialer(dialer, fmt.Sprintf("%s:%d", ic.cfg.Server, ic.cfg.Port))
 		}
-		c, err = client.DialWithDialerTLS(dialer, fmt.Sprintf("%s:%d", ic.cfg.Server, ic.cfg.Port), tlsCfg)
-	} else {
-		c, err = client.DialWithDialer(dialer, fmt.Sprintf("%s:%d", ic.cfg.Server, ic.cfg.Port))
-	}
-	if err != nil {
-		return fmt.Errorf("failed to dial IMAP server: %w", err)
+
+		if err != nil {
+			if attempt < maxRetries-1 {
+				log.Printf("Reconnection attempt %d failed: %v, retrying...", attempt+1, err)
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+				continue
+			}
+			return fmt.Errorf("failed to dial IMAP server after %d attempts: %w", maxRetries, err)
+		}
+
+		// Login
+		if err = c.Login(ic.cfg.Username, ic.cfg.Password); err != nil {
+			c.Logout()
+			if attempt < maxRetries-1 {
+				log.Printf("Reconnection login attempt %d failed: %v, retrying...", attempt+1, err)
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+				continue
+			}
+			return fmt.Errorf("failed to login to IMAP server after %d attempts: %w", maxRetries, err)
+		}
+
+		ic.cl = c
+		ic.authed = true
+		log.Printf("Successfully reconnected to IMAP server")
+		return nil
 	}
 
-	// Login
-	if err = c.Login(ic.cfg.Username, ic.cfg.Password); err != nil {
-		c.Logout()
-		return fmt.Errorf("failed to login to IMAP server: %w", err)
-	}
-
-	ic.cl = c
-	ic.authed = true
-	log.Printf("Successfully reconnected to IMAP server")
-	return nil
+	return fmt.Errorf("failed to reconnect after %d attempts", maxRetries)
 }
 
 // GetClient returns the underlying IMAP client

@@ -24,6 +24,12 @@ const (
 
 func FetchMailboxes(ctx context.Context, ic *Conn) (map[string]*models.MailboxInfo, error) {
 	log.Printf("Starting fetchMailboxes...")
+
+	// Ensure we have a valid authenticated connection before proceeding
+	if err := ic.ensureAuthenticated(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure IMAP authentication: %w", err)
+	}
+
 	mboxes := map[string]*models.MailboxInfo{}
 	ch := make(chan *imap.MailboxInfo, 50)
 	done := make(chan error, 1)
@@ -47,19 +53,71 @@ func FetchMailboxes(ctx context.Context, ic *Conn) (map[string]*models.MailboxIn
 
 	if err := <-done; err != nil {
 		log.Printf("List command failed: %v", err)
+		// Check if it's a connection error and try to reconnect
+		if strings.Contains(err.Error(), "short write") ||
+			strings.Contains(err.Error(), "connection reset") ||
+			strings.Contains(err.Error(), "broken pipe") {
+			log.Printf("Connection error detected, attempting to reconnect and retry...")
+			if reconErr := ic.ensureAuthenticated(ctx); reconErr != nil {
+				return nil, fmt.Errorf("failed to reconnect after list error: %w", reconErr)
+			}
+			// Retry the list operation once after reconnection
+			return FetchMailboxes(ctx, ic)
+		}
 		return nil, err
 	}
 
-	// Fetch exists counts quickly by STATUS
+	// Fetch exists counts quickly by STATUS with retry logic
 	statusCount := 0
 	for name := range mboxes {
-		status, err := client.Status(name, []imap.StatusItem{imap.StatusMessages})
+		// Retry status operation with reconnection if needed
+		var status *imap.MailboxStatus
+		var err error
+		maxRetries := 2
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			client = ic.GetClient() // Get fresh client reference
+			if client == nil {
+				if reconErr := ic.ensureAuthenticated(ctx); reconErr != nil {
+					log.Printf("Status failed for mailbox %s: no client and reconnection failed: %v", name, reconErr)
+					break
+				}
+				client = ic.GetClient()
+			}
+
+			status, err = client.Status(name, []imap.StatusItem{imap.StatusMessages})
+			if err == nil {
+				break // Success
+			}
+
+			// Check if it's a connection error
+			if strings.Contains(err.Error(), "short write") ||
+				strings.Contains(err.Error(), "connection reset") ||
+				strings.Contains(err.Error(), "broken pipe") {
+				log.Printf("Status failed for mailbox %s due to connection error: %v", name, err)
+				if attempt < maxRetries-1 {
+					log.Printf("Attempting to reconnect...")
+					if reconErr := ic.ensureAuthenticated(ctx); reconErr != nil {
+						log.Printf("Reconnection failed: %v", reconErr)
+						break
+					}
+				}
+			} else {
+				// Non-connection error, don't retry
+				log.Printf("Status failed for mailbox %s: %v", name, err)
+				break
+			}
+		}
+
 		if err != nil {
-			log.Printf("Status failed for mailbox %s: %v", name, err)
+			log.Printf("Status failed for mailbox %s after retries: %v", name, err)
 			continue
 		}
-		mboxes[name].Exists = status.Messages
-		statusCount++
+
+		if status != nil {
+			mboxes[name].Exists = status.Messages
+			statusCount++
+		}
 	}
 
 	// hierarchy
@@ -125,8 +183,28 @@ func MailboxApproxSize(ctx context.Context, ic *Conn, cache *cache.Cache, mailbo
 		return 0, fmt.Errorf("no valid IMAP client")
 	}
 
-	_, err := client.Select(mailbox, true)
-	if err != nil {
+	// Retry select operation with reconnection if needed
+	var err error
+	maxRetries := 2
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		_, err = client.Select(mailbox, true)
+		if err == nil {
+			break // Success
+		}
+
+		// Check if it's a connection error
+		if strings.Contains(err.Error(), "short write") ||
+			strings.Contains(err.Error(), "connection reset") ||
+			strings.Contains(err.Error(), "broken pipe") {
+			if attempt < maxRetries-1 {
+				log.Printf("Select failed for mailbox %s due to connection error, attempting to reconnect...", mailbox)
+				if reconErr := ic.ensureAuthenticated(ctx); reconErr != nil {
+					return 0, fmt.Errorf("failed to reconnect after select error: %w", reconErr)
+				}
+				client = ic.GetClient()
+				continue
+			}
+		}
 		return 0, err
 	}
 	seqset := new(imap.SeqSet)
@@ -201,11 +279,33 @@ func FetchMessagesApprox(ctx context.Context, ic *Conn, cache *cache.Cache, mail
 		return nil, fmt.Errorf("no valid IMAP client")
 	}
 
-	mbox, err := client.Select(mailbox, true)
-	if err != nil {
+	// Retry select operation with reconnection if needed
+	var mbox *imap.MailboxStatus
+	var err error
+	maxRetries := 2
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		mbox, err = client.Select(mailbox, true)
+		if err == nil {
+			break // Success
+		}
+
+		// Check if it's a connection error
+		if strings.Contains(err.Error(), "short write") ||
+			strings.Contains(err.Error(), "connection reset") ||
+			strings.Contains(err.Error(), "broken pipe") {
+			if attempt < maxRetries-1 {
+				log.Printf("Select failed for mailbox %s due to connection error, attempting to reconnect...", mailbox)
+				if reconErr := ic.ensureAuthenticated(ctx); reconErr != nil {
+					return nil, fmt.Errorf("failed to reconnect after select error: %w", reconErr)
+				}
+				client = ic.GetClient()
+				continue
+			}
+		}
 		return nil, err
 	}
-	if mbox.Messages == 0 {
+
+	if mbox == nil || mbox.Messages == 0 {
 		return []*models.MsgEntry{}, nil
 	}
 	seqset := new(imap.SeqSet)

@@ -18,6 +18,16 @@ build:
 run:
 	go run ./$(MAIN_DIR)
 
+# Run with custom timeout (useful for debugging connection issues)
+.PHONY: run-timeout
+run-timeout:
+	IMAP_TIMEOUT=5m go run ./$(MAIN_DIR)
+
+# Test connection
+.PHONY: test-conn
+test-conn:
+	./test_connection.sh
+
 # Clean build artifacts
 .PHONY: clean
 clean:

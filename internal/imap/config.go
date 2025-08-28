@@ -32,7 +32,7 @@ func LoadConfig() (Config, error) {
 	flag.StringVar(&cfg.Username, "user", os.Getenv("IMAP_USER"), "IMAP username (env IMAP_USER)")
 	flag.StringVar(&cfg.Password, "pass", os.Getenv("IMAP_PASS"), "IMAP password (env IMAP_PASS)")
 	flag.StringVar(&cfg.Cache, "cache", envStr("IMAPDU_CACHE", filepath.Join(defaultDataDir(), "imapdu-cache.bolt")), "Cache file path")
-	flag.DurationVar(&cfg.Timeout, "timeout", envDuration("IMAP_TIMEOUT", 30*time.Second), "Network timeout")
+	flag.DurationVar(&cfg.Timeout, "timeout", envDuration("IMAP_TIMEOUT", 2*time.Minute), "Network timeout")
 	flag.BoolVar(&cfg.DryRun, "dry-run", envBool("IMAPDU_DRY_RUN", true), "Dry run mode - prevent actual deletion of mails/attachments (env IMAPDU_DRY_RUN)")
 	flag.Parse()
 
@@ -88,4 +88,3 @@ func defaultDataDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", appName)
 }
-

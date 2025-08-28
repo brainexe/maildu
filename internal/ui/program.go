@@ -48,6 +48,10 @@ type model struct {
 	loadedMsg map[string][]*models.MsgEntry // mailbox -> messages
 	sortBy    string                        // "size" or "name"
 
+	// loading state
+	loading    bool
+	loadingMsg string
+
 	err error
 }
 
@@ -70,6 +74,8 @@ func initialModel(cfg imap.Config, cache *cache.Cache, ic *imap.Conn) model {
 		mailboxes:      map[string]*models.MailboxInfo{},
 		loadedMsg:      map[string][]*models.MsgEntry{},
 		sortBy:         "size",
+		loading:        true,
+		loadingMsg:     "Connecting to IMAP server...",
 	}
 }
 
@@ -79,11 +85,9 @@ func (m model) Init() tea.Cmd {
 
 func (m model) loadMailboxesCmd() tea.Cmd {
 	return func() tea.Msg {
-		log.Printf("Starting to load mailboxes...")
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
-		log.Printf("Fetching mailboxes from IMAP server...")
 		boxes, err := imap.FetchMailboxes(ctx, m.ic)
 		if err != nil {
 			log.Printf("Error fetching mailboxes: %v", err)
@@ -91,12 +95,10 @@ func (m model) loadMailboxesCmd() tea.Cmd {
 		}
 
 		// Compute sizes (approx via RFC822.SIZE aggregate)
-		log.Printf("Computing mailbox sizes...")
 		if err := imap.ComputeMailboxSizes(ctx, m.ic, m.cache, boxes); err != nil {
 			log.Printf("Error computing mailbox sizes: %v", err)
 			return errMsg{err}
 		}
-		log.Printf("Computing mailbox sizes done")
 
 		return boxesMsg{boxes}
 	}
@@ -121,6 +123,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case boxesMsg:
 		m.mailboxes = msg.boxes
+		m.loading = false
 		return m, m.refreshListCmd()
 	case msgsMsg:
 		m.loadedMsg[msg.mailbox] = msg.msgs
@@ -175,6 +178,12 @@ func (m model) View() string {
 	if m.err != nil {
 		header += lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Error: "+m.err.Error()) + "\n"
 	}
+
+	if m.loading {
+		loadingStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+		header += loadingStyle.Render("⏳ "+m.loadingMsg) + "\n"
+	}
+
 	return header + m.list.View() + "\n" + m.help.View(m.keys)
 }
 
