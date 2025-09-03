@@ -39,17 +39,23 @@ func FetchMailboxes(ctx context.Context, ic *Conn) (map[string]*models.MailboxIn
 		return nil, fmt.Errorf("no valid IMAP client")
 	}
 
+	log.Printf("Calling IMAP List command...")
 	go func() {
-		log.Printf("Calling IMAP List command...")
-		done <- client.List("", "*", ch)
+		log.Printf("Starting IMAP List goroutine...")
+		err := client.List("", "*", ch)
+		log.Printf("IMAP List command completed with error: %v", err)
+		done <- err
 	}()
 
 	count := 0
+	log.Printf("Waiting for mailbox data from channel...")
 	for m := range ch {
+		log.Printf("Received mailbox: %s", m.Name)
 		mb := &models.MailboxInfo{Name: m.Name}
 		mboxes[m.Name] = mb
 		count++
 	}
+	log.Printf("Channel closed, received %d mailboxes", count)
 
 	if err := <-done; err != nil {
 		log.Printf("List command failed: %v", err)
@@ -67,9 +73,19 @@ func FetchMailboxes(ctx context.Context, ic *Conn) (map[string]*models.MailboxIn
 		return nil, err
 	}
 
+	log.Printf("Successfully fetched %d mailboxes", len(mboxes))
+
 	// Fetch exists counts quickly by STATUS with retry logic
 	statusCount := 0
 	for name := range mboxes {
+		// Skip expensive operations if context is cancelled
+		select {
+		case <-ctx.Done():
+			log.Printf("Context cancelled, stopping status operations after %d successful", statusCount)
+			return mboxes, nil
+		default:
+		}
+
 		// Retry status operation with reconnection if needed
 		var status *imap.MailboxStatus
 		var err error
@@ -93,7 +109,8 @@ func FetchMailboxes(ctx context.Context, ic *Conn) (map[string]*models.MailboxIn
 			// Check if it's a connection error
 			if strings.Contains(err.Error(), "short write") ||
 				strings.Contains(err.Error(), "connection reset") ||
-				strings.Contains(err.Error(), "broken pipe") {
+				strings.Contains(err.Error(), "broken pipe") ||
+				strings.Contains(err.Error(), "Not logged in") {
 				log.Printf("Status failed for mailbox %s due to connection error: %v", name, err)
 				if attempt < maxRetries-1 {
 					log.Printf("Attempting to reconnect...")
@@ -160,14 +177,23 @@ func RootLevel(m map[string]*models.MailboxInfo) []*models.MailboxInfo {
 func ComputeMailboxSizes(ctx context.Context, ic *Conn, cache *cache.Cache, boxes map[string]*models.MailboxInfo) error {
 	processed := 0
 	for name := range boxes {
+		// Skip expensive operations if context is cancelled
+		select {
+		case <-ctx.Done():
+			log.Printf("Context cancelled, stopping size computation after %d processed", processed)
+			return nil
+		default:
+		}
+
 		size, err := MailboxApproxSize(ctx, ic, cache, name)
 		if err != nil {
 			log.Printf("Error computing size for mailbox %s: %v", name, err)
-			// best effort
+			// best effort - continue with other mailboxes
 			continue
 		}
 		boxes[name].SizeSum = size
 		processed++
+		log.Printf("Computed size for mailbox %s: %s (%d/%d)", name, models.HumanBytes(size), processed, len(boxes))
 	}
 	return nil
 }

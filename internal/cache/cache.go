@@ -38,7 +38,7 @@ func Open(path string) (*Cache, error) {
 	}
 
 	log.Printf("Opening BoltDB at: %s", path)
-	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 30 * time.Second})
 	if err != nil {
 		log.Printf("Failed to open BoltDB: %v", err)
 		return nil, err

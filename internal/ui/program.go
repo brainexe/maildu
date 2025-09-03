@@ -85,7 +85,7 @@ func (m model) Init() tea.Cmd {
 
 func (m model) loadMailboxesCmd() tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
 		boxes, err := imap.FetchMailboxes(ctx, m.ic)
@@ -94,10 +94,10 @@ func (m model) loadMailboxesCmd() tea.Cmd {
 			return errMsg{err}
 		}
 
-		// Compute sizes (approx via RFC822.SIZE aggregate)
+		// Compute sizes (approx via RFC822.SIZE aggregate) - continue even if some fail
 		if err := imap.ComputeMailboxSizes(ctx, m.ic, m.cache, boxes); err != nil {
-			log.Printf("Error computing mailbox sizes: %v", err)
-			return errMsg{err}
+			log.Printf("Error computing mailbox sizes (continuing anyway): %v", err)
+			// Don't return error, just log it and continue with partial data
 		}
 
 		return boxesMsg{boxes}
@@ -112,6 +112,7 @@ type msgsMsg struct {
 	mailbox string
 	msgs    []*models.MsgEntry
 }
+type refreshMsg struct{}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -122,14 +123,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.error
 		return m, nil
 	case boxesMsg:
+		log.Printf("Received %d mailboxes in UI", len(msg.boxes))
 		m.mailboxes = msg.boxes
 		m.loading = false
-		return m, m.refreshListCmd()
+		log.Printf("Calling refreshListCmd...")
+		m.refreshList()
+		return m, nil
+	case refreshMsg:
+		// Force a re-render by returning the model
+		return m, nil
 	case msgsMsg:
 		m.loadedMsg[msg.mailbox] = msg.msgs
 		// If still in that mailbox, refresh view
 		if m.currentMailbox == msg.mailbox {
-			return m, m.refreshListCmd()
+			m.refreshList()
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -138,8 +145,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Up):
 			m.list.CursorUp()
+			return m, nil
 		case key.Matches(msg, m.keys.Down):
 			m.list.CursorDown()
+			return m, nil
 		case key.Matches(msg, m.keys.Enter):
 			return m.handleEnter()
 		case key.Matches(msg, m.keys.Back):
@@ -156,9 +165,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.sortBy = "size"
 			}
-			return m, m.refreshListCmd()
+			m.refreshList()
+			return m, nil
 		}
-		// pass to list
+		// pass to list for other keys (but not up/down which we handled above)
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
 		return m, cmd
@@ -184,6 +194,9 @@ func (m model) View() string {
 		header += loadingStyle.Render("⏳ "+m.loadingMsg) + "\n"
 	}
 
+	// Debug: log list state during rendering
+	log.Printf("View() called - List has %d items, loading: %v", len(m.list.Items()), m.loading)
+
 	return header + m.list.View() + "\n" + m.help.View(m.keys)
 }
 
@@ -194,21 +207,37 @@ func (m model) refreshCmd() tea.Cmd {
 	return m.loadMessagesCmd(m.currentMailbox)
 }
 
-func (m model) refreshListCmd() tea.Cmd {
+func (m *model) refreshList() {
 	if m.currentMailbox == "" {
-		// show mailboxes
+		// show mailboxes at current path level
+		log.Printf("Refreshing mailbox list, have %d mailboxes", len(m.mailboxes))
 		items := []list.Item{}
-		roots := imap.RootLevel(m.mailboxes)
-		sort.Slice(roots, func(i, j int) bool {
-			if m.sortBy == "size" {
-				if roots[i].SizeSum == roots[j].SizeSum {
-					return roots[i].Name < roots[j].Name
-				}
-				return roots[i].SizeSum > roots[j].SizeSum
+		var mboxesToShow []*models.MailboxInfo
+
+		if len(m.path) == 0 {
+			// At root level, show root mailboxes
+			mboxesToShow = imap.RootLevel(m.mailboxes)
+			log.Printf("Found %d root level mailboxes", len(mboxesToShow))
+		} else {
+			// At subdirectory level, show children of current path
+			currentPath := strings.Join(m.path, "/")
+			if currentMbox, exists := m.mailboxes[currentPath]; exists {
+				mboxesToShow = currentMbox.Children
+				log.Printf("Found %d children of %s", len(mboxesToShow), currentPath)
 			}
-			return roots[i].Name < roots[j].Name
+		}
+
+		sort.Slice(mboxesToShow, func(i, j int) bool {
+			if m.sortBy == "size" {
+				if mboxesToShow[i].SizeSum == mboxesToShow[j].SizeSum {
+					return mboxesToShow[i].Name < mboxesToShow[j].Name
+				}
+				return mboxesToShow[i].SizeSum > mboxesToShow[j].SizeSum
+			}
+			return mboxesToShow[i].Name < mboxesToShow[j].Name
 		})
-		for _, mb := range roots {
+		for _, mb := range mboxesToShow {
+			log.Printf("Adding mailbox item: %s", mb.Name)
 			items = append(items, models.ListItem{
 				Name:      mb.Name,
 				IsMailbox: true,
@@ -217,14 +246,17 @@ func (m model) refreshListCmd() tea.Cmd {
 				Count:     mb.Exists,
 			})
 		}
+		log.Printf("Setting %d items in list", len(items))
 		m.list.Title = "Mailboxes"
 		m.list.SetItems(items)
-		return nil
+		log.Printf("List now has %d items", len(m.list.Items()))
+		return
 	}
 	// messages inside mailbox
 	msgs := m.loadedMsg[m.currentMailbox]
 	if msgs == nil {
-		return m.loadMessagesCmd(m.currentMailbox)
+		// Can't refresh messages that aren't loaded yet
+		return
 	}
 	sort.Slice(msgs, func(i, j int) bool {
 		if m.sortBy == "size" {
@@ -247,7 +279,6 @@ func (m model) refreshListCmd() tea.Cmd {
 	}
 	m.list.Title = m.currentMailbox
 	m.list.SetItems(items)
-	return nil
 }
 
 func (m model) handleEnter() (tea.Model, tea.Cmd) {
@@ -256,10 +287,19 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if sel.IsMailbox {
-		// drill down: if has children, go down. If leaf, open messages
-		m.path = append(m.path, sel.Mailbox.Name)
-		m.currentMailbox = sel.Mailbox.Name
-		return m, m.loadMessagesCmd(sel.Mailbox.Name)
+		// Check if mailbox has children
+		if len(sel.Mailbox.Children) > 0 {
+			// Has children, navigate into subdirectory
+			m.path = append(m.path, sel.Mailbox.Name)
+			m.currentMailbox = "" // Stay in directory view
+			m.refreshList()
+			return m, nil
+		} else {
+			// No children, this is a leaf mailbox - load messages
+			m.path = append(m.path, sel.Mailbox.Name)
+			m.currentMailbox = sel.Mailbox.Name
+			return m, m.loadMessagesCmd(sel.Mailbox.Name)
+		}
 	}
 	// For messages, maybe later show detail; for now no-op
 	return m, nil
@@ -269,13 +309,37 @@ func (m model) handleBack() (tea.Model, tea.Cmd) {
 	if len(m.path) == 0 {
 		return m, nil
 	}
+
+	// Remove the last path element
 	m.path = m.path[:len(m.path)-1]
+
 	if len(m.path) == 0 {
+		// Back to root level
 		m.currentMailbox = ""
-		return m, m.refreshListCmd()
+		m.refreshList()
+		return m, nil
 	}
-	m.currentMailbox = m.path[len(m.path)-1]
-	return m, m.refreshListCmd()
+
+	// Check if we should show directory contents or messages
+	currentPath := strings.Join(m.path, "/")
+	if currentMbox, exists := m.mailboxes[currentPath]; exists {
+		if len(currentMbox.Children) > 0 {
+			// Has children, show directory view
+			m.currentMailbox = ""
+			m.refreshList()
+			return m, nil
+		} else {
+			// No children, show messages
+			m.currentMailbox = currentPath
+			m.refreshList()
+			return m, nil
+		}
+	}
+
+	// Fallback to directory view
+	m.currentMailbox = ""
+	m.refreshList()
+	return m, nil
 }
 
 func (m model) loadMessagesCmd(mailbox string) tea.Cmd {

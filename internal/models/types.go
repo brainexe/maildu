@@ -36,7 +36,10 @@ func (li ListItem) Description() string {
 		if li.Count > 0 {
 			return fmt.Sprintf("%d msgs, %s", li.Count, HumanBytes(li.Size))
 		}
-		return "empty"
+		if li.Size > 0 {
+			return fmt.Sprintf("~%s", HumanBytes(li.Size))
+		}
+		return "computing..."
 	}
 	return HumanBytes(li.Size)
 }

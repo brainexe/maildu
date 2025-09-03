@@ -3,3 +3,4 @@ vendor
 .env
 cache.bolt
 imapdu
+imapdu.log
