@@ -6,14 +6,14 @@ import (
 
 type keyMap struct {
 	Up, Down, Enter, Back, Delete, Strip, Refresh, Quit key.Binding
-	ToggleSort                                          key.Binding
+	ToggleSort, ListMode                                key.Binding
 }
 
 func newKeyMap() keyMap {
 	return keyMap{
 		Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		Enter:   key.NewBinding(key.WithKeys("enter", "l"), key.WithHelp("enter/l", "open")),
+		Enter:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Back:    key.NewBinding(key.WithKeys("h", "backspace"), key.WithHelp("h/⌫", "back")),
 		Delete:  key.NewBinding(key.WithKeys("x", "delete"), key.WithHelp("x", "delete msg")),
 		Strip:   key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "strip attach")),
@@ -23,18 +23,20 @@ func newKeyMap() keyMap {
 			key.WithKeys("t"),
 			key.WithHelp("t", "toggle sort"),
 		),
+		ListMode: key.NewBinding(
+			key.WithKeys("l"),
+			key.WithHelp("l", "list mode"),
+		),
 	}
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Delete, k.Strip, k.Refresh, k.Quit, k.ToggleSort}
+	return []key.Binding{k.Up, k.Down, k.Enter, k.Back, k.Delete, k.Strip, k.Refresh, k.Quit, k.ToggleSort, k.ListMode}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Enter, k.Back},
-		{k.Delete, k.Strip, k.Refresh, k.Quit, k.ToggleSort},
+		{k.Delete, k.Strip, k.Refresh, k.Quit, k.ToggleSort, k.ListMode},
 	}
 }
-
-

@@ -52,6 +52,7 @@ type MsgEntry struct {
 	From      string
 	Date      time.Time
 	SizeBytes uint64
+	Mailbox   string // mailbox name for list mode
 }
 
 // simpleLiteral implements imap.Literal interface
