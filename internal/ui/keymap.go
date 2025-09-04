@@ -40,5 +40,3 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Delete, k.Strip, k.Refresh, k.Quit, k.ToggleSort, k.ListMode},
 	}
 }
-
-

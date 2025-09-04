@@ -42,7 +42,7 @@ type model struct {
 	// navigation
 	currentMailbox string // empty -> root mailboxes
 	path           []string
-	listMode       bool   // true when in list mode showing all mails
+	listMode       bool // true when in list mode showing all mails
 
 	// data
 	mailboxes map[string]*models.MailboxInfo
@@ -197,17 +197,17 @@ func (m model) View() string {
 	if m.cfg.DryRun {
 		dryRunStatus = " [DRY RUN]"
 	}
-	
+
 	modeStatus := ""
 	if m.listMode {
 		modeStatus = " [LIST MODE]"
 	}
-	
+
 	mailboxInfo := models.PathString(m.path)
 	if m.listMode {
 		mailboxInfo = "All Mailboxes"
 	}
-	
+
 	header := fmt.Sprintf("Server: %s  Mailbox: %s  Sort: %s%s%s\n", m.cfg.Server, mailboxInfo, m.sortBy, dryRunStatus, modeStatus)
 	if m.err != nil {
 		header += lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render("Error: "+m.err.Error()) + "\n"
@@ -239,7 +239,7 @@ func (m *model) refreshList() {
 			// Can't refresh messages that aren't loaded yet
 			return
 		}
-		
+
 		// Sort by site (from field) first, then by size or subject
 		sort.Slice(msgs, func(i, j int) bool {
 			// Extract site from From field (everything after @)
@@ -252,12 +252,12 @@ func (m *model) refreshList() {
 			if len(siteJ) > 1 {
 				siteJStr = strings.ToLower(siteJ[1])
 			}
-			
+
 			// First sort by site
 			if siteIStr != siteJStr {
 				return siteIStr < siteJStr
 			}
-			
+
 			// Then by size or subject
 			if m.sortBy == "size" {
 				if msgs[i].SizeBytes == msgs[j].SizeBytes {
@@ -268,7 +268,7 @@ func (m *model) refreshList() {
 			// name = subject
 			return strings.ToLower(msgs[i].Subject) < strings.ToLower(msgs[j].Subject)
 		})
-		
+
 		items := make([]list.Item, 0, len(msgs))
 		for _, me := range msgs {
 			title := fmt.Sprintf("[%s] [%d] %s — %s", me.Mailbox, me.UID, models.Truncate(me.Subject, 60), me.From)
@@ -282,7 +282,7 @@ func (m *model) refreshList() {
 		m.list.SetItems(items)
 		return
 	}
-	
+
 	if m.currentMailbox == "" {
 		// show mailboxes at current path level
 		log.Printf("Refreshing mailbox list, have %d mailboxes", len(m.mailboxes))
@@ -437,34 +437,34 @@ func (m model) loadAllMessagesCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
-		
+
 		var allMsgs []*models.MsgEntry
-		
+
 		// Get all leaf mailboxes (mailboxes without children)
 		leafMailboxes := m.getLeafMailboxes()
-		
+
 		for _, mailbox := range leafMailboxes {
 			msgs, err := imap.FetchMessagesApprox(ctx, m.ic, m.cache, mailbox.Name)
 			if err != nil {
 				log.Printf("Error loading messages from %s: %v", mailbox.Name, err)
 				continue // Continue with other mailboxes
 			}
-			
+
 			// Set mailbox name for each message
 			for _, msg := range msgs {
 				msg.Mailbox = mailbox.Name
 			}
-			
+
 			allMsgs = append(allMsgs, msgs...)
 		}
-		
+
 		return allMsgsMsg{msgs: allMsgs}
 	}
 }
 
 func (m model) getLeafMailboxes() []*models.MailboxInfo {
 	var leafMailboxes []*models.MailboxInfo
-	
+
 	var traverse func(mailbox *models.MailboxInfo)
 	traverse = func(mailbox *models.MailboxInfo) {
 		if len(mailbox.Children) == 0 {
@@ -477,13 +477,13 @@ func (m model) getLeafMailboxes() []*models.MailboxInfo {
 			}
 		}
 	}
-	
+
 	// Start from root mailboxes
 	rootMailboxes := imap.RootLevel(m.mailboxes)
 	for _, root := range rootMailboxes {
 		traverse(root)
 	}
-	
+
 	return leafMailboxes
 }
 
